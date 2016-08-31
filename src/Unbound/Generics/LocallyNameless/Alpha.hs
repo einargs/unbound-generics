@@ -22,8 +22,10 @@ module Unbound.Generics.LocallyNameless.Alpha (
   , isConsistentDisjointSet
   , isNullDisjointSet
   -- * Implementation details
-  , NthPatFind(..)
-  , NamePatFind(..)
+  , NthPatFind
+  , runNthPatFind
+  , NamePatFind
+  , runNamePatFind
   , AlphaCtx
   , initialCtx
   , patternCtx
@@ -62,6 +64,8 @@ import Data.Monoid (Monoid(..), (<>), All(..))
 import Data.Ratio (Ratio)
 import Data.Typeable (Typeable, gcast, typeOf)
 import GHC.Generics
+
+import qualified Data.Sequence as Seq
 
 import Unbound.Generics.LocallyNameless.Name
 import Unbound.Generics.LocallyNameless.Fresh
@@ -286,34 +290,46 @@ retractFFM (FFM h) = h return j
     j mmf = mmf >>= \mf -> mf
 {-# INLINE retractFFM #-}
 
--- | The result of @'nthPatFind' a i@ is @Left k@ where @i-k@ is the
+-- | The result of @runNthPatFind ('nthPatFind' a) i@ is @Left k@ where @i-k@ is the
 -- number of names in pattern @a@ (with @k < i@) or @Right x@ where @x@
 -- is the @i@th name in @a@
-newtype NthPatFind = NthPatFind { runNthPatFind :: Integer -> Either Integer AnyName }
+newtype NthPatFind = NthPatFind (Seq.Seq AnyName)
+
+runNthPatFind :: NthPatFind -> Integer -> Either Integer AnyName
+runNthPatFind (NthPatFind xs) =
+  let n = fromIntegral (Seq.length xs)
+  in \i -> if i < n
+           then Right (Seq.index xs (fromIntegral i))
+           else Left $! (i - n)
 
 instance Monoid NthPatFind where
-  mempty = NthPatFind Left
-  mappend (NthPatFind f) (NthPatFind g) =
-    NthPatFind $ \i -> case f i of
-    Left i' -> g i'
-    found@Right {} -> found
+  mempty = NthPatFind mempty
+  mappend (NthPatFind xs) (NthPatFind ys) = NthPatFind (xs <> ys)
 
--- | The result of @'namePatFind' a x@ is either @Left i@ if @a@ is a pattern that
+singleNthPatFind :: AnyName -> NthPatFind
+singleNthPatFind = NthPatFind . Seq.singleton
+
+-- | The result of @runNamePatFind ('namePatFind' a) x@ is either @Left i@ if @a@ is a pattern that
 -- contains @i@ free names none of which are @x@, or @Right j@ if @x@ is the @j@th name
 -- in @a@
-newtype NamePatFind = NamePatFind { runNamePatFind :: AnyName
-                                                      -- Left - names skipped over
-                                                      -- Right - index of the name we found
-                                                      -> Either Integer Integer }
+newtype NamePatFind = NamePatFind (Seq.Seq AnyName)
+
+runNamePatFind :: NamePatFind
+               -> AnyName
+               -- Left - names skipped over
+                  -- Right - index of the name we found
+               -> Either Integer Integer
+runNamePatFind (NamePatFind xs) = \nm ->
+  case Seq.elemIndexL nm xs of
+    Just j -> Right (fromIntegral j)
+    Nothing -> Left (fromIntegral (Seq.length xs))
 
 instance Monoid NamePatFind where
-  mempty = NamePatFind (\_ -> Left 0)
-  mappend (NamePatFind f) (NamePatFind g) =
-    NamePatFind $ \nm -> case f nm of
-    ans@Right {} -> ans
-    Left n -> case g nm of
-      Left m -> Left $! n + m
-      Right i -> Right $! n + i
+  mempty = NamePatFind mempty
+  mappend (NamePatFind xs) (NamePatFind ys) = NamePatFind (xs <> ys)
+
+singleNamePatFind :: AnyName -> NamePatFind
+singleNamePatFind = NamePatFind . Seq.singleton
 
 -- | The "Generic" representation version of 'Alpha'
 class GAlpha f where
@@ -719,13 +735,9 @@ instance Typeable a => Alpha (Name a) where
 
   isTerm _ = mempty
 
-  nthPatFind nm = NthPatFind $ \i ->
-    if i == 0 then Right (AnyName nm) else Left $! i-1
+  nthPatFind = singleNthPatFind . AnyName
 
-  namePatFind nm1 = NamePatFind $ \(AnyName nm2) ->
-    case gcast nm1 of
-      Just nm1' -> if nm1' == nm2 then Right 0 else Left 1
-      Nothing -> Left 1
+  namePatFind  = singleNamePatFind . AnyName
 
   swaps' ctx perm nm =
     if isTermCtx ctx
@@ -806,11 +818,9 @@ instance Alpha AnyName where
 
   close ctx b (AnyName nm) = AnyName (close ctx b nm)
     
-  nthPatFind nm = NthPatFind $ \i ->
-    if i == 0 then Right nm else Left $! i - 1
+  nthPatFind = singleNthPatFind
 
-  namePatFind nmHave = NamePatFind $ \nmWant ->
-    if nmHave == nmWant then Right 0 else Left 1
+  namePatFind = singleNamePatFind
 
   acompare' _ x y | x == y = EQ
 
