@@ -66,6 +66,7 @@ import Data.Typeable (Typeable, gcast, typeOf)
 import GHC.Generics
 
 import qualified Data.Sequence as Seq
+import qualified Data.Map as Map
 
 import Unbound.Generics.LocallyNameless.Name
 import Unbound.Generics.LocallyNameless.Fresh
@@ -297,9 +298,9 @@ newtype NthPatFind = NthPatFind (Seq.Seq AnyName)
 
 runNthPatFind :: NthPatFind -> Integer -> Either Integer AnyName
 runNthPatFind (NthPatFind xs) =
-  let n = fromIntegral (Seq.length xs)
+  let n = toInteger (Seq.length xs)
   in \i -> if i < n
-           then Right (Seq.index xs (fromIntegral i))
+           then Right (Seq.index xs (fromInteger i))
            else Left $! (i - n)
 
 instance Monoid NthPatFind where
@@ -312,24 +313,39 @@ singleNthPatFind = NthPatFind . Seq.singleton
 -- | The result of @runNamePatFind ('namePatFind' a) x@ is either @Left i@ if @a@ is a pattern that
 -- contains @i@ free names none of which are @x@, or @Right j@ if @x@ is the @j@th name
 -- in @a@
-newtype NamePatFind = NamePatFind (Seq.Seq AnyName)
+data NamePatFind =
+  NamePatFind !(Seq.Seq AnyName) -- names in the order we see them
+  (Map.Map AnyName Integer) -- (lazy) map from names to their index in the sequence
 
 runNamePatFind :: NamePatFind
                -> AnyName
                -- Left - names skipped over
                   -- Right - index of the name we found
                -> Either Integer Integer
-runNamePatFind (NamePatFind xs) = \nm ->
-  case Seq.elemIndexL nm xs of
-    Just j -> Right (fromIntegral j)
-    Nothing -> Left (fromIntegral (Seq.length xs))
+runNamePatFind (NamePatFind xs m) =
+  let skipCount = toInteger (Seq.length xs)
+  in \nm ->
+    case Map.lookup nm m of
+      Just j -> Right j
+      Nothing -> Left skipCount
+
+-- | @addNamesOnRight n mLeft sRight == mLeft <> Map.fromList $ zip (Seq.toList sRight) [n ..]@
+-- makes a new map that has all the elements of @mLeft@ together with
+-- the elements @[(y0, n), ... (yk, n + k)]@ where @sRight = [y0, ..., yk]@
+addNamesOnRight :: Integer -> Map.Map AnyName Integer -> Seq.Seq AnyName -> Map.Map AnyName Integer
+addNamesOnRight z0 = Seq.foldlWithIndex (\m idx x -> Map.insert x (z0 + toInteger idx) m)
 
 instance Monoid NamePatFind where
-  mempty = NamePatFind mempty
-  mappend (NamePatFind xs) (NamePatFind ys) = NamePatFind (xs <> ys)
+  mempty = NamePatFind mempty mempty
+  mappend (NamePatFind xs m0) (NamePatFind ys _) =
+    let zs = xs <> ys
+        -- all the xs are numbered 0..n-1 in m0,
+        -- add all the ys numbering from n
+        m' = addNamesOnRight (toInteger $ Seq.length xs) m0 ys
+    in NamePatFind zs m'
 
 singleNamePatFind :: AnyName -> NamePatFind
-singleNamePatFind = NamePatFind . Seq.singleton
+singleNamePatFind x = NamePatFind (Seq.singleton x) (Map.singleton x 0)
 
 -- | The "Generic" representation version of 'Alpha'
 class GAlpha f where
